@@ -149,6 +149,7 @@ class Client:
         root_uri: t.Optional[str] = None,
         workspace_folders: t.Optional[t.List[WorkspaceFolder]] = None,
         trace: str = "off",
+        capabilities: t.Optional[JSONDict] = None,
     ) -> None:
         self._state = ClientState.NOT_INITIALIZED
 
@@ -180,7 +181,7 @@ class Client:
                     else [f.model_dump() for f in workspace_folders]
                 ),
                 "trace": trace,
-                "capabilities": CAPABILITIES,
+                "capabilities": capabilities or CAPABILITIES,
             },
         )
         self._state = ClientState.WAITING_FOR_INITIALIZED
@@ -246,10 +247,10 @@ class Client:
             case "textDocument/completion":
                 completion_list = None
 
-                if response.result is not None:
+                try:
+                    completion_list = CompletionList.model_validate(response.result)
+                except ValidationError:
                     try:
-                        completion_list = CompletionList.model_validate(response.result)
-                    except ValidationError:
                         if (
                             isinstance(response.result, dict)
                             and "items" in response.result
@@ -260,6 +261,10 @@ class Client:
                                     t.List[CompletionItem]
                                 ).validate_python(response.result["items"]),
                             )
+                        else:
+                            completion_list = None
+                    except ValidationError:
+                        completion_list = None
 
                 event = Completion(
                     message_id=response.id, completion_list=completion_list
@@ -301,23 +306,10 @@ class Client:
                 event.message_id = response.id
 
             case "textDocument/rename":
-                if response.result is not None and isinstance(response.result, dict):
-                    if "documentChanges" in response.result:
-                        document_changes = [
-                            TextDocumentEdit.model_validate(change)
-                            for change in response.result["documentChanges"]
-                        ]
-                        event = WorkspaceEdit(
-                            message_id=response.id, documentChanges=document_changes
-                        )
-                    elif "changes" in response.result:
-                        event = WorkspaceEdit(
-                            message_id=response.id, changes=response.result["changes"]
-                        )
-                    else:
-                        event = WorkspaceEdit(message_id=response.id)
-                else:
-                    event = WorkspaceEdit(message_id=response.id)
+                params = response.result if response.result is not None else {}
+                if not isinstance(params, dict):
+                    params = {}
+                event = WorkspaceEdit(message_id=response.id, **params)
 
             # GOTOs
             case "textDocument/definition":
@@ -417,6 +409,7 @@ class Client:
 
         elif request.method == "$/progress":
             assert request.params is not None
+            assert isinstance(request.params, dict)
             kind = MWorkDoneProgressKind(request.params["value"]["kind"])
             if kind == MWorkDoneProgressKind.BEGIN:
                 event = parse_request(WorkDoneProgressBegin)
